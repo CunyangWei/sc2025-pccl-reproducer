@@ -102,6 +102,7 @@ def build():
     sources=[srcpath / 'pccl.cpp', 
              srcpath / 'all_gather.cpp', 
              srcpath / 'reduce_scatter.cpp',
+             srcpath / 'all_to_all.cpp',
              srcpath / 'common.cu']
 
    

@@ -1,17 +1,20 @@
 #!/bin/bash
+
+#SBATCH --account bega-delta-gpu
+#SBATCH -N 2
 #SBATCH --gpus-per-node=4
-#SBATCH -A m2404_g
-#SBATCH --nodes=1
+#SBATCH --cpus-per-task=16
 #SBATCH --ntasks-per-node=4
-#SBATCH --constraint=gpu
+#SBATCH --partition=gpuA100x4
 #SBATCH --time=00:05:00
-#SBATCH --qos=regular
+#SBATCH --output=raw_collectives_benchmark.out
+#SBATCH --error=raw_collectives_benchmark.err
 
 
 module load nccl
-module load cudatoolkit/12.4
-source $SCRATCH/pccl-venv/bin/activate
-module load PrgEnv-gnu cray-mpich craype-accel-nvidia80
+module load cuda/12.6.3
+source /u/cunyang/pccl-venv/bin/activate
+module load PrgEnv-gnu cray-mpich
 
 ## calculating the number of nodes and GPUs
 export NNODES=$SLURM_JOB_NUM_NODES
@@ -51,6 +54,7 @@ export MPICH_GPU_ALLREDUCE_USE_KERNEL=1
 # collecting counter data
 #export MPICH_OFI_CXI_COUNTER_REPORT=5
 
+# SCRIPT="python -u benchmark_raw_collectives/all_to_all.py \
 SCRIPT="python -u benchmark_raw_collectives/all_gather.py \
         --num-gpus-per-node $GPUS_PER_NODE \
         --machine perlmutter \
@@ -62,8 +66,8 @@ export CXX=CC
 export CC=cc
 export PYTHONPATH="$PYTHONPATH:."
 
-chmod +x scripts/get_rank.sh
-run_cmd="srun -C gpu -N $NNODES -n $GPUS -c 32 $CPU_MASK --gpus-per-node=4 ./scripts/get_rank.sh $SCRIPT"
+chmod +x /u/cunyang/sc2025-pccl-reproducer/scripts/get_rank.sh
+run_cmd="srun --mpi=pmi2 -C gpu -N $NNODES -n $GPUS $CPU_MASK --gpus-per-node=4 ./u/cunyang/sc2025-pccl-reproducer/scripts/get_rank.sh $SCRIPT"
 echo $run_cmd 
 eval $run_cmd
 

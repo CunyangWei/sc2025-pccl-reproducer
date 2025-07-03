@@ -1,0 +1,23 @@
+
+The following have been reloaded with a version change:
+  1) cuda/11.8.0 => cuda/12.6.3
+
+
+Lmod is automatically replacing "gcc/11.4.0" with "gcc-native/12.2".
+
+
+Lmod is automatically replacing "openmpi/4.1.6" with "cray-mpich/8.1.28".
+
+
+Due to MODULEPATH changes, the following have been reloaded:
+  1) nccl/2.19.3-1.awsplugin
+
+The following have been reloaded with a version change:
+  1) cuda/12.6.3 => cuda/11.8.0
+  2) gcc-runtime/11.4.0 => gcc-runtime/8.5.0
+  3) libfabric/1.15.2.0 => libfabric/1.13.1
+
+srun --mpi=pmi2 -C gpu -N 2 -n 8 --cpu-bind=cores --gpus-per-node=4 ./u/cunyang/sc2025-pccl-reproducer/scripts/get_rank.sh python -u benchmark_raw_collectives/all_to_all.py --num-gpus-per-node 4 --machine perlmutter --library pccl --test
+srun: Job 10914024 step creation temporarily disabled, retrying (Requested nodes are busy)
+srun: Job 10914024 step creation still disabled, retrying (Requested nodes are busy)
+slurmstepd: error: *** JOB 10914024 ON gpua093 CANCELLED AT 2025-07-03T15:52:31 DUE TO TIME LIMIT ***

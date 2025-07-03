@@ -4,6 +4,7 @@
 #include <mpi4py/mpi4py.h>
 #include "reduce_scatter.h"
 #include "all_gather.h"
+#include "all_to_all.h"
 
 
 namespace py = pybind11;
@@ -141,8 +142,94 @@ void all_gather_mpi(const torch::Tensor& output_tensor,
     }
 }
 
+void all_to_all_mpi(const torch::Tensor& output_tensor, 
+    const torch::Tensor& input_tensor, 
+    py::object py_comm,
+    const std::string& algorithm = "spread_out")
+{
+    TORCH_CHECK(output_tensor.is_contiguous(), "output tensor must be contiguous.");
+    TORCH_CHECK(input_tensor.is_contiguous(), "input tensor must be contiguous.");
+
+    // Ensure 1D tensors.
+    TORCH_CHECK(output_tensor.dim() == 1, "output tensor must be 1D");
+    TORCH_CHECK(input_tensor.dim() == 1, "input tensor must be 1D");
+
+    // Ensure input and output dtypes are the same
+    TORCH_CHECK(input_tensor.dtype() == output_tensor.dtype(),
+                "Input and output tensors must have the same dtype.");
+
+    // Get MPI rank/size.
+    int rank, size;
+    // Get reference to base communicator
+    MPI_Comm comm = ((PyMPIIntracommObject*)(py_comm.ptr()))->__pyx_base.ob_mpi;
+
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+
+    int64_t total_elems = input_tensor.numel();
+    TORCH_CHECK(total_elems % size == 0,
+    "Input tensor size must be divisible by number of processes");
+
+    // Ensure output tensor has same size as input
+    TORCH_CHECK(output_tensor.numel() == total_elems,
+    "Output tensor must have same size as input tensor");
+
+    // Get raw device pointers (assumes tensors reside on GPU).
+    void* output_ptr = output_tensor.data_ptr();
+    const void* input_ptr = input_tensor.data_ptr();
+    
+    // Get dtype size for generic handling
+    int dtype_size = output_tensor.element_size();  
+    
+    // Call the corresponding GPU all-to-all algorithm.
+    if (algorithm == "spread_out") {
+        // always use torch tensors. do NOT use malloc.
+        // malloc's have high overheads and will slow your communication down
+        // torch mallocs memory in advance and manages it internally.
+        // therefore these calls are low overheads
+        auto tmp_wrkspace_tensor_1 = torch::empty_like(input_tensor);
+        auto tmp_wrkspace_tensor_2 = torch::empty_like(input_tensor);
+        spreadOutAllToAllGPU(output_ptr, 
+            input_ptr, 
+            total_elems * dtype_size,
+            tmp_wrkspace_tensor_1.data_ptr(),
+            tmp_wrkspace_tensor_2.data_ptr(),
+            comm);
+    } else if (algorithm == "pairwise_exchange") {
+        auto tmp_wrkspace_tensor_1 = torch::empty_like(input_tensor);
+        auto tmp_wrkspace_tensor_2 = torch::empty_like(input_tensor);
+        pairwiseExchangeAllToAllGPU(output_ptr, 
+            input_ptr, 
+            total_elems * dtype_size,
+            tmp_wrkspace_tensor_1.data_ptr(),
+            tmp_wrkspace_tensor_2.data_ptr(),
+            comm);
+    } else if (algorithm == "ring") {
+        auto tmp_wrkspace_tensor_1 = torch::empty_like(input_tensor);
+        auto tmp_wrkspace_tensor_2 = torch::empty_like(input_tensor);
+        ringAllToAllGPU(output_ptr, 
+            input_ptr, 
+            total_elems * dtype_size,
+            tmp_wrkspace_tensor_1.data_ptr(),
+            tmp_wrkspace_tensor_2.data_ptr(),
+            comm);
+    } else if (algorithm == "bruck") {
+        auto tmp_wrkspace_tensor_1 = torch::empty_like(input_tensor);
+        auto tmp_wrkspace_tensor_2 = torch::empty_like(input_tensor);
+        bruckAllToAllGPU(output_ptr, 
+            input_ptr, 
+            total_elems * dtype_size,
+            tmp_wrkspace_tensor_1.data_ptr(),
+            tmp_wrkspace_tensor_2.data_ptr(),
+            comm);
+    } else {
+    TORCH_CHECK(false, "Unknown algorithm specified for all_to_all_mpi: ", algorithm);
+    }
+}
+
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("reduce_scatter_mpi", reduce_scatter_mpi);
     m.def("all_gather_mpi", all_gather_mpi);
+    m.def("all_to_all_mpi", all_to_all_mpi);
 }

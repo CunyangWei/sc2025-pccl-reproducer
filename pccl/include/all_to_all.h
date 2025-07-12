@@ -31,4 +31,10 @@ void bruckAllToAllGPU(void* output,
                       void* recv_buf,
                       MPI_Comm comm = MPI_COMM_WORLD);
 
+// void ncclAllToAllGPU(void* output, 
+//                      const void* input, 
+//                      int total_elems, 
+//                      ncclComm_t comm,
+//                      cudaStream_t stream = 0);
+
 #endif // ALL_TO_ALL_H

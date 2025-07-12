@@ -90,12 +90,16 @@ def _all_to_all(
 
     # Case 1: torch.distributed.ProcessGroup
     if group is None or isinstance(group, dist.ProcessGroup):
+        # print(f"Using torch.distributed.all_to_all")
+        # print(f"group size: {dist.get_world_size(group)}")
         # Delegate to torch.distributed.all_to_all
         input_list = list(torch.chunk(input_tensor, dist.get_world_size(group)))
         output_list = list(torch.chunk(output_tensor, dist.get_world_size(group)))
         request = dist.all_to_all(output_list, input_list, group, async_op)
     # Case 2: mpi4py.MPI.Comm
     elif isinstance(group, MPI.Comm):
+        # print(f"Using PCCL C++ backend")
+        # print(f"group size: {group.Get_size()}")
         if use_pccl_cpp_backend:
             import pccl as pccl_cpp
             request = pccl_cpp.all_to_all_mpi(output_tensor, 
@@ -137,10 +141,12 @@ def all_to_all_2D(output_tensor: torch.Tensor,
     _all_to_all(output_intermediate, input_permuted, group.get_inner_group(), 
                 async_op=False, use_pccl_cpp_backend=use_pccl_cpp_backend, algorithm=algorithm)
     
+    input_permuted = output_intermediate.view(intra_node_group_size, inter_node_group_size, -1).transpose(0, 1).reshape(-1)
+    
     # Step 3: Inter-node all-to-all
-    _all_to_all(output_tensor, output_intermediate, group.get_outer_group(), 
+    _all_to_all(output_tensor, input_permuted, group.get_outer_group(), 
                 async_op=False, use_pccl_cpp_backend=use_pccl_cpp_backend, algorithm=algorithm)
     
     # Step 4: Unpermute output data
-    output_unpermuted = output_tensor.view(intra_node_group_size, inter_node_group_size, -1).transpose(0, 1).reshape(-1)
-    output_tensor.copy_(output_unpermuted)
+    # output_unpermuted = output_tensor.view(intra_node_group_size, inter_node_group_size, -1).transpose(0, 1).reshape(-1)
+    # output_tensor.copy_(output_unpermuted)

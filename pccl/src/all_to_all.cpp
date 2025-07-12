@@ -46,33 +46,39 @@ void spreadOutAllToAllGPU(void* output,
                              cudaMemcpyDeviceToDevice, 
                              stream));
 
+    // Use non-blocking communication for better overlap
+    MPI_Request requests[2 * (size - 1)];
+    int req_idx = 0;
+
+    CUDA_CHECK(cudaEventRecord(stream_sync_event, stream));
+    CUDA_CHECK(cudaEventSynchronize(stream_sync_event));
+
     // Perform all-to-all exchanges
     for (int step = 1; step < size; step++) {
-        int partner = (rank + step) % size;
         
-        // Calculate send and receive offsets
-        int send_offset = partner * block_size;
-        int recv_offset = partner * block_size;
-        
+        int send_partner = (rank + step) % size;
+        int recv_partner = (rank - step + size) % size;
+
+        // Send data
+        int send_offset = send_partner * block_size;
+        void *send_ptr = (char *)send_buf + send_offset;
+
         // Synchronize CUDA stream before MPI communication
-        CUDA_CHECK(cudaEventRecord(stream_sync_event, stream));
-        CUDA_CHECK(cudaEventSynchronize(stream_sync_event));
+        // CUDA_CHECK(cudaEventRecord(stream_sync_event, stream));
+        // CUDA_CHECK(cudaEventSynchronize(stream_sync_event));
+
+        MPI_Isend(send_ptr, block_size, MPI_BYTE, send_partner, step,
+                  comm, &requests[req_idx++]);
+
+        // Receive data
+        int recv_offset = recv_partner * block_size;
+        void *recv_ptr = (char *)output + recv_offset;
+
+        MPI_Irecv(recv_ptr, block_size, MPI_BYTE, recv_partner, step,
+                  comm, &requests[req_idx++]);
         
-        // Exchange data with partner
-        MPI_Sendrecv(static_cast<char*>(send_buf) + send_offset, 
-                     block_size, MPI_BYTE, partner, 0,
-                     static_cast<char*>(recv_buf) + recv_offset, 
-                     block_size, MPI_BYTE, partner, 0,
-                     comm, MPI_STATUS_IGNORE);
-        
-        // Copy received data to correct position in output
-        CUDA_CHECK(cudaMemcpyAsync(static_cast<char*>(output) + recv_offset, 
-                                 static_cast<char*>(recv_buf) + recv_offset, 
-                                 block_size, 
-                                 cudaMemcpyDeviceToDevice, 
-                                 stream));
     }
-    
+    MPI_Waitall(req_idx, requests, MPI_STATUSES_IGNORE);
     CUDA_CHECK(cudaEventDestroy(stream_sync_event));
 }
 
@@ -106,54 +112,58 @@ void pairwiseExchangeAllToAllGPU(void* output,
                              stream));
 
     // Pairwise exchange in log(P) phases
-    for (int phase = 0; phase < size - 1; phase++) {
-        int partner;
-        if (phase % 2 == 0) {
-            // Even phase: pair with next process
-            if (rank % 2 == 0 && rank + 1 < size) {
-                partner = rank + 1;
-            } else if (rank % 2 == 1) {
-                partner = rank - 1;
-            } else {
-                continue; // Odd rank at end, no partner
-            }
-        } else {
-            // Odd phase: pair with previous process
-            if (rank % 2 == 1 && rank + 1 < size) {
-                partner = rank + 1;
-            } else if (rank % 2 == 0 && rank > 0) {
-                partner = rank - 1;
-            } else {
-                continue; // Even rank at start, no partner
+    int nsteps = (int)ceil(log2(size));
+
+    for (int step = 0; step < nsteps; step++)
+    {
+        int partner = rank ^ (1 << step);
+
+        if (partner >= size)
+            continue;
+
+        int send_count = 0;
+        int recv_count = 0;
+        
+        char *send_ptr = (char *)send_buf;
+        for (int i = 0; i < size; i++)
+        {
+            if ((i & (1 << step)) != (rank & (1 << step)))
+            {
+                CUDA_CHECK(cudaMemcpyAsync(send_ptr, (char *)output + i * block_size, block_size, cudaMemcpyDeviceToDevice, stream));
+                send_ptr += block_size;
+                send_count += block_size;
             }
         }
-        
-        // Determine which blocks to exchange
-        int send_block = (rank + partner + phase) % size;
-        int recv_block = (partner + rank + phase) % size;
-        
-        int send_offset = send_block * block_size;
-        int recv_offset = recv_block * block_size;
-        
+
+        for (int i = 0; i < size; i++)
+        {
+            if ((i & (1 << step)) != (rank & (1 << step)))
+            {
+                recv_count += block_size;
+            }
+        }
+
         // Synchronize CUDA stream before MPI communication
         CUDA_CHECK(cudaEventRecord(stream_sync_event, stream));
         CUDA_CHECK(cudaEventSynchronize(stream_sync_event));
         
         // Exchange blocks with partner
-        MPI_Sendrecv(static_cast<char*>(output) + send_offset, 
-                     block_size, MPI_BYTE, partner, phase,
-                     static_cast<char*>(recv_buf), 
-                     block_size, MPI_BYTE, partner, phase,
-                     comm, MPI_STATUS_IGNORE);
+        MPI_Sendrecv(send_buf, send_count, MPI_CHAR, partner, 0,
+            recv_buf, recv_count, MPI_CHAR, partner, 0,
+            comm, MPI_STATUS_IGNORE);
         
         // Copy received data to correct position
-        CUDA_CHECK(cudaMemcpyAsync(static_cast<char*>(output) + recv_offset, 
-                                 recv_buf, 
-                                 block_size, 
-                                 cudaMemcpyDeviceToDevice, 
-                                 stream));
+        char *recv_ptr = (char *)recv_buf;
+        for (int i = 0; i < size; i++)
+        {
+            if ((i & (1 << step)) != (rank & (1 << step)))
+            {
+                CUDA_CHECK(cudaMemcpyAsync((char *)output + i * block_size, recv_ptr, block_size, cudaMemcpyDeviceToDevice, stream));
+                recv_ptr += block_size;
+            }
+        }
     }
-    
+    MPI_Barrier(comm);
     CUDA_CHECK(cudaEventDestroy(stream_sync_event));
 }
 
@@ -173,64 +183,15 @@ void ringAllToAllGPU(void* output,
     assert(total_elems % size == 0 && "Input tensor size must be divisible by number of processes");
     int block_size = total_elems / size;
 
-    auto stream = at::cuda::getCurrentCUDAStream();
-    
-    // Create CUDA event for synchronization
-    cudaEvent_t stream_sync_event;
-    CUDA_CHECK(cudaEventCreateWithFlags(&stream_sync_event, cudaEventDisableTiming));
-
-    // Copy input to send buffer
-    CUDA_CHECK(cudaMemcpyAsync(send_buf, 
-                             input, 
-                             total_elems, 
-                             cudaMemcpyDeviceToDevice, 
-                             stream));
-
-    // Initialize output with local data
-    CUDA_CHECK(cudaMemcpyAsync(static_cast<char*>(output) + rank * block_size, 
-                             static_cast<const char*>(input) + rank * block_size, 
-                             block_size, 
-                             cudaMemcpyDeviceToDevice, 
-                             stream));
-
     // Ring algorithm: P-1 steps, each process sends one block around the ring
-    for (int step = 0; step < size - 1; step++) {
-        int send_to = (rank + 1) % size;
-        int recv_from = (rank - 1 + size) % size;
-        
-        // Calculate which block to send/receive in this step
-        int send_block = (rank - step + size) % size;
-        int recv_block = (recv_from - step + size) % size;
-        
-        int send_offset = send_block * block_size;
-        int recv_offset = recv_block * block_size;
-        
-        // Synchronize CUDA stream before MPI communication
-        CUDA_CHECK(cudaEventRecord(stream_sync_event, stream));
-        CUDA_CHECK(cudaEventSynchronize(stream_sync_event));
-        
-        // Send to next, receive from previous in ring
-        MPI_Sendrecv(static_cast<char*>(send_buf) + send_offset, 
-                     block_size, MPI_BYTE, send_to, step,
-                     static_cast<char*>(recv_buf), 
-                     block_size, MPI_BYTE, recv_from, step,
-                     comm, MPI_STATUS_IGNORE);
-        
-        // Copy received data to output and update send buffer for next iteration
-        CUDA_CHECK(cudaMemcpyAsync(static_cast<char*>(output) + recv_offset, 
-                                 recv_buf, 
-                                 block_size, 
-                                 cudaMemcpyDeviceToDevice, 
-                                 stream));
-        
-        CUDA_CHECK(cudaMemcpyAsync(static_cast<char*>(send_buf) + recv_offset, 
-                                 recv_buf, 
-                                 block_size, 
-                                 cudaMemcpyDeviceToDevice, 
-                                 stream));
+    MPI_Request requests[size];
+    for (int i = 0; i < size; i++)
+    {
+        MPI_Isend(input + i * block_size, block_size, MPI_BYTE, i, 0, comm, &requests[i]);
+        MPI_Irecv(output + i * block_size, block_size, MPI_BYTE, i, 0, comm, &requests[i]);
     }
-    
-    CUDA_CHECK(cudaEventDestroy(stream_sync_event));
+    MPI_Waitall(size, requests, MPI_STATUSES_IGNORE);
+    MPI_Barrier(comm);
 }
 
 // Performs a Bruck all-to-all on GPU tensors.
@@ -255,77 +216,105 @@ void bruckAllToAllGPU(void* output,
     cudaEvent_t stream_sync_event;
     CUDA_CHECK(cudaEventCreateWithFlags(&stream_sync_event, cudaEventDisableTiming));
 
-    // Copy input to send buffer
-    CUDA_CHECK(cudaMemcpyAsync(send_buf, 
-                             input, 
-                             total_elems, 
-                             cudaMemcpyDeviceToDevice, 
-                             stream));
+    void *R       = send_buf;
+    void *T_send  = recv_buf;
+    void *T_recv;
+    CUDA_CHECK(cudaMalloc(&T_recv, ((size + 1) / 2) * block_size));
 
-    // Bruck algorithm: log(P) rotation and exchange steps
-    int num_steps = static_cast<int>(std::ceil(std::log2(size)));
-    
-    for (int step = 0; step < num_steps; step++) {
-        int distance = 1 << step; // 2^step
-        int partner = rank ^ distance; // XOR for partner calculation
-        
-        if (partner < size) {
-            // Calculate blocks to exchange in this step
-            int send_count = 0;
-            int recv_count = 0;
-            
-            // Determine which blocks to send/receive based on binary representation
-            for (int i = 0; i < size; i++) {
-                if ((i ^ rank) >= distance && (i ^ rank) < (distance << 1)) {
-                    if (step == 0 || ((i ^ rank) & ((1 << step) - 1)) == 0) {
-                        send_count++;
-                    }
-                }
-                if ((i ^ partner) >= distance && (i ^ partner) < (distance << 1)) {
-                    if (step == 0 || ((i ^ partner) & ((1 << step) - 1)) == 0) {
-                        recv_count++;
-                    }
-                }
-            }
-            
-            // For simplicity, exchange blocks in chunks
-            int exchange_size = (size >> (step + 1)) * block_size;
-            if (exchange_size == 0) exchange_size = block_size;
-            
-            int send_offset = ((rank ^ distance) % size) * block_size;
-            int recv_offset = send_offset;
-            
-            // Synchronize CUDA stream before MPI communication
-            CUDA_CHECK(cudaEventRecord(stream_sync_event, stream));
-            CUDA_CHECK(cudaEventSynchronize(stream_sync_event));
-            
-            // Exchange data with partner
-            MPI_Sendrecv(static_cast<char*>(send_buf) + send_offset, 
-                         exchange_size, MPI_BYTE, partner, step,
-                         static_cast<char*>(recv_buf), 
-                         exchange_size, MPI_BYTE, partner, step,
-                         comm, MPI_STATUS_IGNORE);
-            
-            // Update send buffer with received data for next iteration
-            CUDA_CHECK(cudaMemcpyAsync(static_cast<char*>(send_buf) + recv_offset, 
-                                     recv_buf, 
-                                     exchange_size, 
-                                     cudaMemcpyDeviceToDevice, 
-                                     stream));
-        }
+    const void *S = input;
+    void *O       = output;
+
+    for (int i = 0; i < size; ++i) {
+        int src = (rank + i) % size;
+        CUDA_CHECK(cudaMemcpyAsync(R + i * block_size,
+               S + src * block_size,
+               block_size,
+               cudaMemcpyDeviceToDevice,
+               stream));
     }
-    
-    // Final copy to output buffer in correct order
-    for (int i = 0; i < size; i++) {
-        int src_offset = ((rank + i) % size) * block_size;
-        int dst_offset = i * block_size;
-        
-        CUDA_CHECK(cudaMemcpyAsync(static_cast<char*>(output) + dst_offset, 
-                                 static_cast<char*>(send_buf) + src_offset, 
-                                 block_size, 
-                                 cudaMemcpyDeviceToDevice, 
-                                 stream));
+
+    int *SB = (int *)malloc(sizeof(int) * ((size + 1) / 2));
+
+    for (int k = 1; k < size; k <<= 1)
+    {
+        int NB = 0;
+        for (int i = k; i < size; ++i)
+            if (i & k)
+                SB[NB++] = i;
+
+        const int send_bytes = NB * block_size;
+
+        for (int idx = 0; idx < NB; ++idx)
+            CUDA_CHECK(cudaMemcpyAsync(T_send + idx * block_size,
+                   R + SB[idx] * block_size,
+                   block_size,
+                   cudaMemcpyDeviceToDevice,
+                   stream));
+
+        const int sendproc = (rank + k) % size;
+        const int recvproc = (rank - k + size) % size;
+
+        CUDA_CHECK(cudaEventRecord(stream_sync_event, stream));
+        CUDA_CHECK(cudaEventSynchronize(stream_sync_event));
+
+        // CUDA_CHECK(cudaStreamSynchronize(stream));
+
+        MPI_Sendrecv(T_send,  send_bytes, MPI_BYTE, sendproc, 0,
+                     T_recv,  send_bytes, MPI_BYTE, recvproc, 0,
+                     comm, MPI_STATUS_IGNORE);
+
+        for (int idx = 0; idx < NB; ++idx)
+            CUDA_CHECK(cudaMemcpyAsync(R + SB[idx] * block_size,
+                   T_recv + idx * block_size,
+                   block_size,
+                   cudaMemcpyDeviceToDevice,
+                   stream));
     }
+
+    free(SB);
+    cudaFree(T_recv);
+
+    for (int i = 0; i < size; ++i) {
+        int src = (rank - i + size) % size;
+        CUDA_CHECK(cudaMemcpyAsync(O + i * block_size,
+               R + src * block_size,
+               block_size,
+               cudaMemcpyDeviceToDevice,
+               stream));
+    }
+
+    MPI_Barrier(comm);
     
     CUDA_CHECK(cudaEventDestroy(stream_sync_event));
 }
+
+// Performs a direct NCCL all-to-all on GPU tensors using NCCL grouped operations.
+// This is the most efficient implementation for intra-node communication.
+// void ncclAllToAllGPU(void* output, 
+//                      const void* input, 
+//                      int total_elems, 
+//                      ncclComm_t comm,
+//                      cudaStream_t stream) {
+    
+//     int rank, nranks;
+//     NCCL_CHECK(ncclCommUserRank(comm, &rank));
+//     NCCL_CHECK(ncclCommCount(comm, &nranks));
+
+//     assert(total_elems % nranks == 0 && "Input tensor size must be divisible by number of ranks");
+//     int block_size = total_elems / nranks;
+
+//     // Use NCCL grouped operations for optimal performance
+//     NCCL_CHECK(ncclGroupStart());
+    
+//     for (int r = 0; r < nranks; r++) {
+//         // Send block r to rank r
+//         const char* send_ptr = static_cast<const char*>(input) + r * block_size;
+//         NCCL_CHECK(ncclSend(send_ptr, block_size, ncclInt8, r, comm, stream));
+        
+//         // Receive block from rank r
+//         char* recv_ptr = static_cast<char*>(output) + r * block_size;
+//         NCCL_CHECK(ncclRecv(recv_ptr, block_size, ncclInt8, r, comm, stream));
+//     }
+    
+//     NCCL_CHECK(ncclGroupEnd());
+// }

@@ -222,6 +222,10 @@ void all_to_all_mpi(const torch::Tensor& output_tensor,
             tmp_wrkspace_tensor_1.data_ptr(),
             tmp_wrkspace_tensor_2.data_ptr(),
             comm);
+    } else if (algorithm == "nccl") {
+        // For NCCL algorithm, we need to use PyTorch's NCCL backend
+        // This is handled differently and should be called from Python side
+        TORCH_CHECK(false, "NCCL algorithm should be handled on Python side with PyTorch distributed");
     } else {
     TORCH_CHECK(false, "Unknown algorithm specified for all_to_all_mpi: ", algorithm);
     }

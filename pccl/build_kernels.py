@@ -96,7 +96,7 @@ def build():
                             '--expt-extended-lambda',
                             ]
          extra_c_flags = []
-         extra_link_flags = []
+         extra_link_flags = ['-lnccl']
 
     extra_c_flags += ['-O3', '-std=c++17', "-I"+mpi4py.get_include()] 
     sources=[srcpath / 'pccl.cpp', 

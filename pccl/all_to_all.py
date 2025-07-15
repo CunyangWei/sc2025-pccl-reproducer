@@ -4,6 +4,7 @@ from mpi4py import MPI
 from typing import Optional, Union
 from .request import Request
 from .process_groups import ProcessGroups
+from .nccl_comm import CommHandler, NCCLCommunicator
 
 def spread_out_all_to_all_mpi(output_tensor: torch.Tensor,
                               input_tensor: torch.Tensor,
@@ -85,21 +86,40 @@ def _all_to_all(
     group: Optional[Union[dist.ProcessGroup, MPI.Comm]] = None,
     async_op: bool = False,
     use_pccl_cpp_backend: bool = False,
-    algorithm: str = "spread_out"
+    algorithm: str = "spread_out",
+    is_intra_node: bool = False
 ) -> Optional[Request]:
 
     # Case 1: torch.distributed.ProcessGroup
     if group is None or isinstance(group, dist.ProcessGroup):
-        # print(f"Using torch.distributed.all_to_all")
-        # print(f"group size: {dist.get_world_size(group)}")
-        # Delegate to torch.distributed.all_to_all
-        input_list = list(torch.chunk(input_tensor, dist.get_world_size(group)))
-        output_list = list(torch.chunk(output_tensor, dist.get_world_size(group)))
-        request = dist.all_to_all(output_list, input_list, group, async_op)
+
+        if algorithm == "hypre" and is_intra_node and use_pccl_cpp_backend:
+            
+            from .nccl_comm import CommHandler
+            comm_idx = CommHandler.create_communicator_from_process_group(group)
+            nccl_comm = CommHandler.get_communicator_from_idx(comm_idx)
+            
+            nccl_comm_ptr = nccl_comm.get_comm_handle()
+            if nccl_comm_ptr is None or nccl_comm_ptr == 0:
+                raise RuntimeError("Failed to get valid NCCL communicator handle")
+            
+            # import pccl as pccl_cpp
+            # pccl_cpp.all_to_all_nccl(output_tensor, input_tensor, nccl_comm_ptr)
+            # return None
+            nccl_comm.my_all_to_all(output_tensor, input_tensor)
+            return None
+        else:
+            input_list = list(torch.chunk(input_tensor, dist.get_world_size(group)))
+            output_list = list(torch.chunk(output_tensor, dist.get_world_size(group)))
+            request = dist.all_to_all(output_list, input_list, group, async_op)
+    
     # Case 2: mpi4py.MPI.Comm
     elif isinstance(group, MPI.Comm):
-        # print(f"Using PCCL C++ backend")
-        # print(f"group size: {group.Get_size()}")
+        
+        # For hypre algorithm with MPI groups, use bruck
+        if algorithm == "hypre":
+            algorithm = "bruck"
+        
         if use_pccl_cpp_backend:
             import pccl as pccl_cpp
             request = pccl_cpp.all_to_all_mpi(output_tensor, 
@@ -139,13 +159,13 @@ def all_to_all_2D(output_tensor: torch.Tensor,
     # Step 2: Intra-node all-to-all
     output_intermediate = torch.empty_like(input_permuted)
     _all_to_all(output_intermediate, input_permuted, group.get_inner_group(), 
-                async_op=False, use_pccl_cpp_backend=use_pccl_cpp_backend, algorithm=algorithm)
+                async_op=False, use_pccl_cpp_backend=use_pccl_cpp_backend, algorithm=algorithm, is_intra_node=True)
     
     input_permuted = output_intermediate.view(intra_node_group_size, inter_node_group_size, -1).transpose(0, 1).reshape(-1)
     
     # Step 3: Inter-node all-to-all
     _all_to_all(output_tensor, input_permuted, group.get_outer_group(), 
-                async_op=False, use_pccl_cpp_backend=use_pccl_cpp_backend, algorithm=algorithm)
+                async_op=False, use_pccl_cpp_backend=use_pccl_cpp_backend, algorithm=algorithm, is_intra_node=False)
     
     # Step 4: Unpermute output data
     # output_unpermuted = output_tensor.view(intra_node_group_size, inter_node_group_size, -1).transpose(0, 1).reshape(-1)

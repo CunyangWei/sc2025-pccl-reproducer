@@ -4,7 +4,7 @@
 #include <cuda_runtime.h>
 #include <iostream>
 #include <ATen/cuda/CUDAContext.h>
-// #include <nccl.h>
+#include "nccl.h"
 
 #define CUDA_CHECK(call) do { \
   cudaError_t err = call; \
@@ -15,14 +15,14 @@
   } \
 } while(0)
 
-// #define NCCL_CHECK(call) do { \
-//   ncclResult_t result = call; \
-//   if(result != ncclSuccess) { \
-//       std::cerr << "NCCL error at " << __FILE__ << ":" << __LINE__ \
-//                 << " code=" << result << " \"" << ncclGetErrorString(result) << "\"\n"; \
-//       exit(1); \
-//   } \
-// } while(0)
+#define NCCL_CHECK(call) do { \
+  ncclResult_t result = call; \
+  if(result != ncclSuccess) { \
+      std::cerr << "NCCL error at " << __FILE__ << ":" << __LINE__ \
+                << " code=" << result << " \"" << ncclGetErrorString(result) << "\"\n"; \
+      exit(1); \
+  } \
+} while(0)
 
 // Kernel for vector addition.
 __global__ void vectorAddKernel(float* a, const float* b, int n);

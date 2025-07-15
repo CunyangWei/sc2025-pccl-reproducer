@@ -290,31 +290,31 @@ void bruckAllToAllGPU(void* output,
 
 // Performs a direct NCCL all-to-all on GPU tensors using NCCL grouped operations.
 // This is the most efficient implementation for intra-node communication.
-// void ncclAllToAllGPU(void* output, 
-//                      const void* input, 
-//                      int total_elems, 
-//                      ncclComm_t comm,
-//                      cudaStream_t stream) {
+void ncclAllToAllGPU(void* output, 
+                     const void* input, 
+                     int total_elems, 
+                     ncclComm_t comm,
+                     cudaStream_t stream) {
     
-//     int rank, nranks;
-//     NCCL_CHECK(ncclCommUserRank(comm, &rank));
-//     NCCL_CHECK(ncclCommCount(comm, &nranks));
+    int rank, nranks;
+    NCCL_CHECK(ncclCommUserRank(comm, &rank));
+    NCCL_CHECK(ncclCommCount(comm, &nranks));
 
-//     assert(total_elems % nranks == 0 && "Input tensor size must be divisible by number of ranks");
-//     int block_size = total_elems / nranks;
+    assert(total_elems % nranks == 0 && "Input tensor size must be divisible by number of ranks");
+    int block_size = total_elems / nranks;
 
-//     // Use NCCL grouped operations for optimal performance
-//     NCCL_CHECK(ncclGroupStart());
+    // Use NCCL grouped operations for optimal performance
+    NCCL_CHECK(ncclGroupStart());
     
-//     for (int r = 0; r < nranks; r++) {
-//         // Send block r to rank r
-//         const char* send_ptr = static_cast<const char*>(input) + r * block_size;
-//         NCCL_CHECK(ncclSend(send_ptr, block_size, ncclInt8, r, comm, stream));
+    for (int r = 0; r < nranks; r++) {
+        // Send block r to rank r
+        const char* send_ptr = static_cast<const char*>(input) + r * block_size;
+        NCCL_CHECK(ncclSend(send_ptr, block_size, ncclInt8, r, comm, stream));
         
-//         // Receive block from rank r
-//         char* recv_ptr = static_cast<char*>(output) + r * block_size;
-//         NCCL_CHECK(ncclRecv(recv_ptr, block_size, ncclInt8, r, comm, stream));
-//     }
+        // Receive block from rank r
+        char* recv_ptr = static_cast<char*>(output) + r * block_size;
+        NCCL_CHECK(ncclRecv(recv_ptr, block_size, ncclInt8, r, comm, stream));
+    }
     
-//     NCCL_CHECK(ncclGroupEnd());
-// }
+    NCCL_CHECK(ncclGroupEnd());
+}

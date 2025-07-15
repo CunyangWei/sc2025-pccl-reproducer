@@ -55,13 +55,13 @@ if __name__ == "__main__":
                         help="test for correctness")
     parser.add_argument("--pccl-algorithm", 
                         type=str,
-                        choices=["spread_out", "pairwise_exchange", "ring", "bruck"],
+                        choices=["spread_out", "pairwise_exchange", "ring", "bruck", "hypre"],
                         default="spread_out",
                         help="Choose the all-to-all algorithm for PCCL")
     parser.add_argument("--dtype",
                         type=str,
                         choices=["bf16", "fp32"],
-                        default="bf16")
+                        default="fp32")
     args = parser.parse_args()
     
     if args.use_pccl_cpp_backend:
@@ -73,7 +73,7 @@ if __name__ == "__main__":
             build_pccl()
 
     gpu_count, slurm_job_id = get_gpu_counts_and_job_id()
-    sizes = np.array([1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]) 
+    sizes = np.array([1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024])
     unit = "MB"
     algorithm = args.pccl_algorithm
     

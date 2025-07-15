@@ -5,7 +5,9 @@
 #include "reduce_scatter.h"
 #include "all_gather.h"
 #include "all_to_all.h"
-
+#include "common.h"
+#include <torch/csrc/distributed/c10d/ProcessGroup.hpp> // PyTorch C++ 头文件
+#include <torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp> // NCCL 后端的头文件
 
 namespace py = pybind11;
 
@@ -231,9 +233,49 @@ void all_to_all_mpi(const torch::Tensor& output_tensor,
     }
 }
 
+void all_to_all_nccl(const torch::Tensor& output_tensor, 
+    const torch::Tensor& input_tensor, 
+    uintptr_t nccl_comm_ptr)
+{
+    TORCH_CHECK(output_tensor.is_contiguous(), "output tensor must be contiguous.");
+    TORCH_CHECK(input_tensor.is_contiguous(), "input tensor must be contiguous.");
+
+    // Ensure 1D tensors
+    TORCH_CHECK(output_tensor.dim() == 1, "output tensor must be 1D");
+    TORCH_CHECK(input_tensor.dim() == 1, "input tensor must be 1D");
+
+    // Ensure input and output dtypes are the same
+    TORCH_CHECK(input_tensor.dtype() == output_tensor.dtype(),
+    "Input and output tensors must have the same dtype.");
+
+    // Ensure same size
+    TORCH_CHECK(output_tensor.numel() == input_tensor.numel(),
+    "Input and output tensors must have same size");
+
+    TORCH_CHECK(nccl_comm_ptr != 0, "NCCL communicator pointer is null");
+    
+    ncclComm_t nccl_comm = reinterpret_cast<ncclComm_t>(nccl_comm_ptr);
+    
+    TORCH_CHECK(nccl_comm != nullptr, "NCCL communicator is null after conversion");
+
+    auto stream = at::cuda::getCurrentCUDAStream();
+
+    void* output_ptr = output_tensor.data_ptr();
+    const void* input_ptr = input_tensor.data_ptr();
+    int dtype_size = output_tensor.element_size();
+    int64_t total_elems = input_tensor.numel();
+
+    ncclAllToAllGPU(output_ptr, 
+        input_ptr, 
+        total_elems * dtype_size,
+        nccl_comm,
+        stream);
+}
+
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("reduce_scatter_mpi", reduce_scatter_mpi);
     m.def("all_gather_mpi", all_gather_mpi);
     m.def("all_to_all_mpi", all_to_all_mpi);
+    m.def("all_to_all_nccl", all_to_all_nccl);
 }

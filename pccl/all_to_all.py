@@ -1,6 +1,7 @@
 import torch
 import torch.distributed as dist
 from mpi4py import MPI
+import numpy as np
 from typing import Optional, Union
 from .request import Request
 from .process_groups import ProcessGroups
@@ -87,9 +88,9 @@ def _all_to_all(
     async_op: bool = False,
     use_pccl_cpp_backend: bool = False,
     algorithm: str = "spread_out",
-    is_intra_node: bool = False
+    is_intra_node: bool = False,
+    radix: int = -1
 ) -> Optional[Request]:
-
     # Case 1: torch.distributed.ProcessGroup
     if group is None or isinstance(group, dist.ProcessGroup):
 
@@ -108,10 +109,63 @@ def _all_to_all(
             # return None
             nccl_comm.my_all_to_all(output_tensor, input_tensor)
             return None
+        elif algorithm == "nccl" and use_pccl_cpp_backend:
+            import pccl as pccl_cpp
+            from .nccl_comm import CommHandler
+            # Handle case where group is None (use default process group)
+            if group is None:
+                # Create a communicator for the default process group
+                default_group = dist.distributed_c10d._get_default_group()
+                nccl_comm = CommHandler.get_communicator_from_process_group(default_group)
+            else:
+                nccl_comm = CommHandler.get_communicator_from_process_group(group)
+            request = pccl_cpp.all_to_all_nccl(output_tensor, 
+                                              input_tensor, 
+                                              nccl_comm.comm,
+                                              nccl_comm.rank,
+                                              nccl_comm.nranks,
+                                              algorithm)
+            return request
+        elif use_pccl_cpp_backend and algorithm in ["spread_out", "pairwise_exchange", "bruck", "radix_bruck", "uniform_modified_radix_bruck"] and not is_intra_node:
+            # Use NCCL P2P algorithms for supported algorithms with NCCL groups
+            import pccl as pccl_cpp
+            from .nccl_comm import CommHandler
+            # Handle case where group is None (use default process group)
+            if group is None:
+                # Create a communicator for the default process group
+                default_group = dist.distributed_c10d._get_default_group()
+                nccl_comm = CommHandler.get_communicator_from_process_group(default_group)
+            else:
+                nccl_comm = CommHandler.get_communicator_from_process_group(group)
+            request = pccl_cpp.all_to_all_nccl_p2p(output_tensor, 
+                                                   input_tensor, 
+                                                   nccl_comm.comm,
+                                                   nccl_comm.rank,
+                                                   nccl_comm.nranks,
+                                                   algorithm,
+                                                   radix)
+            return request
         else:
             input_list = list(torch.chunk(input_tensor, dist.get_world_size(group)))
             output_list = list(torch.chunk(output_tensor, dist.get_world_size(group)))
             request = dist.all_to_all(output_list, input_list, group, async_op)
+            
+            # import pccl as pccl_cpp
+            # from .nccl_comm import CommHandler
+            # # Handle case where group is None (use default process group)
+            # if group is None:
+            #     # Create a communicator for the default process group
+            #     default_group = dist.distributed_c10d._get_default_group()
+            #     nccl_comm = CommHandler.get_communicator_from_process_group(default_group)
+            # else:
+            #     nccl_comm = CommHandler.get_communicator_from_process_group(group)
+            # request = pccl_cpp.all_to_all_nccl(output_tensor, 
+            #                                   input_tensor, 
+            #                                   nccl_comm.comm,
+            #                                   nccl_comm.rank,
+            #                                   nccl_comm.nranks,
+            #                                   algorithm)
+            # return request
     
     # Case 2: mpi4py.MPI.Comm
     elif isinstance(group, MPI.Comm):
@@ -122,12 +176,30 @@ def _all_to_all(
         
         if use_pccl_cpp_backend:
             import pccl as pccl_cpp
-            request = pccl_cpp.all_to_all_mpi(output_tensor, 
-                                              input_tensor, 
-                                              group,
-                                              algorithm)
+            if algorithm == "radix_bruck" or algorithm == "uniform_modified_radix_bruck":
+                # Calculate default radix as sqrt(group_size) if not specified
+                if radix == -1:
+                    group_size = group.Get_size()
+                    radix = max(2, int(np.ceil(np.sqrt(group_size))))
+                
+                request = pccl_cpp.all_to_all_mpi(output_tensor, 
+                                                  input_tensor, 
+                                                  group,
+                                                  algorithm,
+                                                  radix)
+            else:
+                request = pccl_cpp.all_to_all_mpi(output_tensor, 
+                                                  input_tensor, 
+                                                  group,
+                                                  algorithm, 
+                                                  -1)
         else:
-            request = spread_out_all_to_all_mpi(output_tensor, input_tensor, group, async_op, algorithm)
+            torch.cuda.current_stream().synchronize()
+            if async_op:
+                request = group.Ialltoall(input_tensor, output_tensor)
+            else:
+                request = group.Alltoall(input_tensor, output_tensor)
+            # request = spread_out_all_to_all_mpi(output_tensor, input_tensor, group, async_op, algorithm)
     else:
         raise TypeError(
             f"Unsupported group type: {type(group)}. "
@@ -140,7 +212,8 @@ def all_to_all_2D(output_tensor: torch.Tensor,
                   group: Optional[ProcessGroups] = None,
                   async_op: bool = False,
                   use_pccl_cpp_backend: bool = False,
-                  algorithm: str = "spread_out"):
+                  algorithm: str = "spread_out",
+                  radix: int = -1):
 
     assert not async_op, "Non blocking version not implemented"
     assert input_tensor.dim() == 1 and output_tensor.dim() == 1, "all_to_all_2D only admits 1D tensors"
@@ -151,7 +224,7 @@ def all_to_all_2D(output_tensor: torch.Tensor,
     # Ensure input and output tensors have the same size
     assert input_tensor.numel() == output_tensor.numel(), "Input and output tensors must have same size"
     assert input_tensor.numel() % world_size == 0, "Input tensor size must be divisible by world size"
-
+    
     # Step 1: Permute input data for hierarchical communication
     # Reshape and transpose to group data by destination
     input_permuted = input_tensor.view(inter_node_group_size, intra_node_group_size, -1).transpose(0, 1).reshape(-1)
@@ -163,9 +236,17 @@ def all_to_all_2D(output_tensor: torch.Tensor,
     
     input_permuted = output_intermediate.view(intra_node_group_size, inter_node_group_size, -1).transpose(0, 1).reshape(-1)
     
-    # Step 3: Inter-node all-to-all
+    # Step 3: Outer-node all-to-all
+    # For outer group, calculate default radix if using radix_bruck or uniform_modified_radix_bruck
+    outer_radix = radix
+    if (algorithm == "radix_bruck" or algorithm == "uniform_modified_radix_bruck") and radix == -1:
+        _, outer_group_size = group.get_world_size()
+        outer_radix = max(2, int(np.ceil(np.sqrt(outer_group_size))))
+    
     _all_to_all(output_tensor, input_permuted, group.get_outer_group(), 
-                async_op=False, use_pccl_cpp_backend=use_pccl_cpp_backend, algorithm=algorithm, is_intra_node=False)
+                async_op=False, use_pccl_cpp_backend=use_pccl_cpp_backend, algorithm=algorithm, 
+                is_intra_node=False, radix=outer_radix)
+    
     
     # Step 4: Unpermute output data
     # output_unpermuted = output_tensor.view(intra_node_group_size, inter_node_group_size, -1).transpose(0, 1).reshape(-1)

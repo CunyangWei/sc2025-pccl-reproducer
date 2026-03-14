@@ -6,9 +6,10 @@
 
 import ctypes
 import torch
+import os
 # NCCL constants
 NCCL_UNIQUE_ID_BYTES = 128
-
+from torch._C import _nccl_version, _cuda_getDeviceCount
 
 class ncclUniqueId(ctypes.Structure):
     _fields_ = [("internal", ctypes.c_byte * NCCL_UNIQUE_ID_BYTES)]
@@ -138,6 +139,11 @@ class CommHandler:
 
         idx = CommHandler.process_group_to_idx[process_group]
         return idx
+    
+    @staticmethod
+    def get_communicator_from_process_group(process_group: torch.distributed.ProcessGroup):
+        idx = CommHandler.create_communicator_from_process_group(process_group)
+        return CommHandler.idx_to_comm[idx]
 
     @staticmethod
     def get_communicator_from_idx(idx: int):
@@ -171,23 +177,38 @@ class CommHandler:
 # Communicator Class for NCCL and RCCL
 class NCCLCommunicator:
     def __init__(self, process_group: torch.distributed.ProcessGroup):
-        rank = torch.distributed.get_rank(process_group)
-        nranks = torch.distributed.get_world_size(process_group)
+        # rank = torch.distributed.get_rank(process_group)
+        # nranks = torch.distributed.get_world_size(process_group)
+        # device = torch.cuda.current_device()
+
+        # if rank == 0:
+        #     unique_id = self.get_unique_id()
+        # else:
+        #     unique_id = ncclUniqueId()
+
+        # tensor = torch.ByteTensor(list(unique_id.internal)).to(device)
+        # ranks = torch.distributed.get_process_group_ranks(process_group)
+        # torch.distributed.broadcast(tensor, src=ranks[0], group=process_group)
+        # byte_list = tensor.cpu().tolist()
+        # for i, byte in enumerate(byte_list):
+        #     unique_id.internal[i] = byte
+
+        # self.initialize_comm(unique_id, nranks, rank, device)
+        
+        import pccl as pccl_cpp
+        self.rank = torch.distributed.get_rank(process_group)
+        self.nranks = torch.distributed.get_world_size(process_group)
         device = torch.cuda.current_device()
 
-        if rank == 0:
-            unique_id = self.get_unique_id()
-        else:
-            unique_id = ncclUniqueId()
+        uid = pccl_cpp.get_nccl_unique_id()
+        gpu_uid = uid.to(device)
+        # Get the global rank of rank 0 within the process group
+        group_src_rank = torch.distributed.get_global_rank(process_group, 0)
+        torch.distributed.broadcast(gpu_uid, src=group_src_rank, group=process_group)
+        torch.distributed.barrier(process_group)
+        uid.copy_(gpu_uid.cpu())
 
-        tensor = torch.ByteTensor(list(unique_id.internal)).to(device)
-        ranks = torch.distributed.get_process_group_ranks(process_group)
-        torch.distributed.broadcast(tensor, src=ranks[0], group=process_group)
-        byte_list = tensor.cpu().tolist()
-        for i, byte in enumerate(byte_list):
-            unique_id.internal[i] = byte
-
-        self.initialize_comm(unique_id, nranks, rank, device)
+        self.comm = pccl_cpp.NcclComm(uid, self.nranks, self.rank)
 
     def initialize_comm(
         self, unique_id: ncclUniqueId, nranks: int, rank: int, device: int

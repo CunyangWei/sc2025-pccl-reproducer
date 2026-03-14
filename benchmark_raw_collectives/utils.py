@@ -19,15 +19,15 @@ def time_something(fn, *args, warmup_iters=5, timed_iters=20, prof=None, **kwarg
     for i in range(warmup_iters):
         with record_function(f"warmup_{i}"):
             fn(*args, **kwargs)
-        #if prof is not None:
-        #prof.step()
+        if prof is not None:
+            prof.step()
     torch.cuda.synchronize()
     start_event.record()
     for i in range(timed_iters):
         with record_function(f"iteration_{i}"):
             fn(*args, **kwargs)
-        #if prof is not None:
-        #prof.step()
+        if prof is not None:
+            prof.step()
     end_event.record()
     torch.cuda.synchronize()
     return start_event.elapsed_time(end_event) / timed_iters

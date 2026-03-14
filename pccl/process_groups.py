@@ -2,6 +2,7 @@ import numpy as np
 import torch.distributed as dist
 from mpi4py import MPI
 from typing import List, Union, Optional
+from .nccl_comm import CommHandler
 
 class ProcessGroups:
     """
@@ -13,7 +14,8 @@ class ProcessGroups:
         intra_group_size: int,
         inter_group_size: int,
         inner_group_backend: str = "nccl",
-        outer_group_backend: str = "mpi"
+        outer_group_backend: str = "mpi",
+        create_inner_mpi_group: bool = False
     ):
         """
         Initialize the ProcessGroups by creating a 2D grid of process groups.
@@ -25,6 +27,8 @@ class ProcessGroups:
                 Must be either "mpi" or "nccl". Defaults to "nccl".
             outer_group_backend (str, optional): Backend for the outer groups.
                 Must be either "mpi" or "nccl". Defaults to "mpi".
+            create_inner_mpi_group (bool, optional): Whether to create an additional 
+                inner MPI group for CPU metadata communication. Defaults to False.
 
         Raises:
             ValueError: If unsupported backends are provided or world size is incompatible.
@@ -39,6 +43,11 @@ class ProcessGroups:
             inner_group_backend=inner_group_backend,
             outer_group_backend=outer_group_backend
         )
+        
+        # Create inner MPI group for CPU metadata communication if requested
+        self.inner_mpi_group = None
+        if create_inner_mpi_group:
+            self._create_inner_mpi_group(intra_group_size)
 
     @staticmethod
     def create_2D_grid(
@@ -112,8 +121,8 @@ class ProcessGroups:
                     this_inner_group = dist.new_group(ranks=ranks, backend="nccl")
                     if rank in ranks:
                         inner_group = this_inner_group
-                        
-
+                        inner_group_idx = CommHandler.create_communicator_from_process_group(this_inner_group)
+                
         elif inner_group_backend == "mpi":
             color = rank // intra_group_size # unique color for each node 
             inner_group_comm = MPI.COMM_WORLD.Split(color)
@@ -130,7 +139,7 @@ class ProcessGroups:
                     this_outer_group = dist.new_group(ranks=ranks, backend="nccl")
                     if rank in ranks:
                         outer_group = this_outer_group
-                        
+                        outer_group_idx = CommHandler.create_communicator_from_process_group(this_outer_group)
 
         elif outer_group_backend == "mpi":
             # second term advances the color by the number of process per node in each 2d group
@@ -254,6 +263,26 @@ class ProcessGroups:
             Union[dist.ProcessGroup, MPI.Comm]: The outer process group.
         """
         return self.outer_group
+
+    def _create_inner_mpi_group(self, intra_group_size: int):
+        """
+        Create an inner MPI group for CPU metadata communication.
+        
+        Args:
+            intra_group_size (int): Size of the inner group.
+        """
+        rank = dist.get_rank()
+        color = rank // intra_group_size  # Same color for processes within the same node
+        self.inner_mpi_group = MPI.COMM_WORLD.Split(color)
+    
+    def get_inner_mpi_group(self) -> Optional[MPI.Comm]:
+        """
+        Get the inner MPI group for CPU metadata communication.
+        
+        Returns:
+            Optional[MPI.Comm]: The inner MPI group, or None if not created.
+        """
+        return self.inner_mpi_group
 
     def __repr__(self) -> str:
         inner_backend = "MPI" if isinstance(self.inner_group, MPI.Comm) else "NCCL"

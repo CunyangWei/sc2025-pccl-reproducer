@@ -78,7 +78,7 @@ def build():
     mpi4py_incl_path = mpi4py.get_include()
     extra_include_paths.append(mpi4py_incl_path)
     extra_include_paths.append(os.path.join(str(pathlib.Path(__file__).parent.absolute()), "include"))
-    
+    extra_include_paths.append("/user-environment/linux-sles15-neoverse_v2/gcc-13.3.0/nccl-2.22.3-1-ezh5r737iyiiphijbxgzeunqu6hlbeja/include")
 
     if torch.version.hip is not None:
          extra_cuda_flags = ['-D__HIP_NO_HALF_OPERATORS__=1',
@@ -98,11 +98,13 @@ def build():
          extra_c_flags = []
          extra_link_flags = ['-lnccl']
 
-    extra_c_flags += ['-O3', '-std=c++17', "-I"+mpi4py.get_include()] 
-    sources=[srcpath / 'pccl.cpp', 
-             srcpath / 'all_gather.cpp', 
+    extra_c_flags += ['-O3', '-std=c++17', "-I"+mpi4py.get_include()]
+    sources=[srcpath / 'pccl.cpp',
+             srcpath / 'all_gather.cpp',
              srcpath / 'reduce_scatter.cpp',
              srcpath / 'all_to_all.cpp',
+             srcpath / 'all_to_allv.cpp',
+             srcpath / 'permute.cu',
              srcpath / 'common.cu']
 
    
